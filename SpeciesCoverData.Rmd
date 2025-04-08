@@ -1,0 +1,265 @@
+---
+title: "desert shrub species level frequency data for pipeline"
+author: "mswan"
+date: "February, 2025"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#install packages 
+library(tidyverse)
+library(lme4)
+library(stringr)
+library(ggforce)
+library(RColorBrewer)
+options(scipen = 100)
+setwd("C:\\Users\\mswan\\OneDrive - DOI\\Documents\\R\\Projects\\SCPN_Upland\\Desert-Shrub")
+getwd()
+```
+
+Connect to sql and get data
+```{r, get data}
+#while remote read csv file instead:
+spp_all<-read.csv("C:\\Users\\mswan\\OneDrive - DOI\\Documents\\R\\Projects\\SCPN_Upland\\Desert-Shrub/_Data/view_Species_All_2007-2024.csv")
+```
+Get species data for infrequent species to check models be sure to exclude decomissioned plots.
+And format for CSP data bucket
+```{r species cover}
+#filter dataframe to get only VALID or Correct and INPANEL and numeric and #reduce to COlumns desired for CSP
+spp_clean_all<-spp_all%>%
+  filter(UsableQuadratForNested %in% "1", EventPanel %in% c("A", "B", "C"))
+#do we have all the plots we expect?
+plots<-spp_clean_all%>%
+  distinct(Plot)
+#36 plots in 3 regions.
+#keep only species that occur somewhere in EcoSite
+spp_clean_occur<-spp_clean_all%>%
+  group_by(EcoSite, CurrentSpecies)%>%
+  mutate(InEcosite = if_else(sum(SpeciesPresentInQuadratForNested)>0, 1, 0))%>%
+  ungroup()%>%
+  filter(InEcosite >0, EventPanel %in% c("A", "B", "C"))
+#write this file to use in future to avoid long download times.
+write.csv(spp_clean_occur, "C:\\Users\\mswan\\OneDrive - DOI\\Documents\\R\\Projects\\SCPN_Upland\\Desert-Shrub\\_Data\\alldsspecies.csv")
+```
+***********************************************************************************************************
+START HERE!
+```{r start here}
+#start here from home
+spp_clean_occur<-read.csv("C:\\Users\\mswan\\OneDrive - DOI\\Documents\\R\\Projects\\SCPN_Upland\\Desert-Shrub\\_Data\\alldsspecies.csv")
+
+#here I want to see what are most common species in each ecosite. First get total count and number of quadrats
+SpeciesFrequency<-spp_clean_occur%>%
+  filter(EventYear>2008)%>%
+  group_by(EcoSite, CurrentSpecies, CommonName, Nativity, Lifeform, Duration)%>%
+  mutate(TotalQuads = sum(UsableQuadratForNested), TotalFreq = sum(SpeciesPresentInQuadratForNested))%>%
+  select(CurrentSpecies, EcoSite, CommonName, Nativity, Lifeform, Duration, TotalQuads, TotalFreq, Lifeform)%>%
+  ungroup()%>%
+  distinct()
+  
+#Now get the calculated % frequency by EcoSite over all years and filtered as desired to get a list.
+SpeciesFrequencyCalc<-SpeciesFrequency%>%
+  group_by(EcoSite)%>%
+  mutate(Freq = TotalFreq / TotalQuads)
+
+write.csv(SpeciesFrequencyCalc, "Data\\species_frequency.csv", row.names = FALSE)
+
+#species list with how many ecosites in which it occurs
+#reviewed for accuracy 03/18
+species_ecosite<-SpeciesFrequencyCalc%>%
+  select(CurrentSpecies, EcoSite, Freq)%>%
+  pivot_wider(names_from = EcoSite, values_from = Freq)
+write.csv(species_ecosite, "Data\\species_list2.csv", row.names = FALSE)
+
+
+#select a species or two that occurs in all ecosites
+check<-SpeciesFrequencyCalc%>%
+  filter(CurrentSpecies %in% "Bromus tectorum")
+
+#write.csv(ELYELY, "C:/pj_m4md/assets/uplands-data/SCPN/elyely_pa.csv", row.names = F)
+
+#get the spp that occur at >30% in any ecosites
+#will try trend on these species.
+dominant_spp<-SpeciesFrequencyCalc%>%
+  filter(Freq>.3)%>%
+  select(CurrentSpecies, EcoSite)%>%
+  distinct()
+
+```
+
+```{r cover}
+#get cc table
+library(RODBC)
+conUpE <- odbcDriverConnect("driver=SQL Server;server=INPSCPNMS01\\Production, 50000; database=SCPN_UplandEvent;trusted_connection=yes;")
+#pull in info for grassland parks
+coverclass<-sqlFetch(conUpE, "tlu_CoverClass", as.is=FALSE, stringsAsFactors = FALSE)
+#mutate table (necessary to get it to work properly)
+coverclass<-coverclass%>%
+  mutate(Low = ifelse(CoverClass ==13, 100, Low))%>%
+  mutate(High = ifelse(CoverClass ==13, 101, High))
+
+close(conUpE)
+#if you haven't already load data
+#spp_clean_occur<-read.csv("C:\\Users\\mswan\\OneDrive - DOI\\Documents\\R\\Projects\\SCPN_Upland\\DesertShrub\\Data\\view_Species_All_2007-2024.csv")
+
+
+#Remove those where usable quadrat for cover =0 and then use cut to put all cover midpoints into the correct classes.(b/c some midpoints are summed due to lumping).
+species_clean<-spp_clean_occur%>%
+  filter(UsableQuadratForCover > 0)%>%
+  filter(EventYear>2007)%>%
+  mutate(CoverClass = cut(CoverClassMidpoint_Quadrat_pct, breaks = coverclass$Low [1:14], labels = coverclass$CoverClass [1:13], include.lowest = TRUE, right = FALSE))%>%
+  separate(TransectQuadratID, c("Junk", "QuadID"), 18, remove = FALSE)
+#check classes are correct using this table showing pct midpoint and applied cover class
+species_clean%>%
+  count(CoverClassMidpoint_Quadrat_pct, CoverClass)%>%
+  as.data.frame()
+
+
+#Separate TransectQuadratFunctionalGroupID into components to get YearDate and put columns in order.
+spp_clean_formatted<-species_clean%>%
+  separate(TransectQuadratID, c("park2", "Plot2", "YearDate", "Transect", "Quadrat"), sep = "_", remove = FALSE, extra = "warn", fill = "warn")%>%
+  select(TransectQuadratID,	YearDate, Transect,	Quadrat,Park,	Plot,	EcoSite,	EventYear,  CurrentSpecies, CoverClass)%>%
+  separate(Plot, c("Trash", "Plot"), sep = "_")%>%
+  select(-Trash)
+
+#now spread wide and select grass spp
+grass_spp<-spp_clean_formatted%>%
+  filter(CurrentSpecies %in% c("Elymus elymoides", "Poa fendleriana", "Bouteloua gracilis", "Sporobolus spp.", "Carex spp.", "Bromus tectorum"))%>%
+  separate(TransectQuadratID, c("park2", "Plot2", "YearDate", "Transect", "Quadrat"), sep = "_", remove = FALSE, extra = "warn", fill = "warn")%>%
+  mutate(Network = "PJ")%>%
+  select(TransectQuadratID, Park, EcoSite, Plot, Transect, Quadrat, EventYear, CurrentSpecies, CoverClass)%>%
+  pivot_wider(names_from = CurrentSpecies, values_from = CoverClass)%>%
+  select(-TransectQuadratID)%>%
+  mutate(Network = "PJ")%>%
+  rename("ELEYELY" = 'Elymus elymoides', "POAFEN" = 'Poa fendleriana', "BOUGRA" = 'Bouteloua gracilis', "SPOROB" = "Sporobolus spp.", "CAREX" = "Carex spp.", "BROTEC"= "Bromus tectorum")
+
+write.csv(grass_spp, "C:/_pj_m4md/assets/uplands-data/SCPN/PJ_grass_spp.csv", row.names = F)
+
+
+#shrub spp
+shrub_spp<-spp_clean_formatted%>%
+  filter(CurrentSpecies %in% c("Purshia tridentata", "Purshia stansburiana", "Gutierrezia sarothrae", "Cercocarpus montanus", "Artemisia tridentata", "Amelanchier utahensis", "Penstemon linarioides", "Quercus spp."))%>%
+  separate(TransectQuadratID, c("park2", "Plot2", "YearDate", "Transect", "Quadrat"), sep = "_", remove = FALSE, extra = "warn", fill = "warn")%>%
+  mutate(Network = "PJ")%>%
+  select(TransectQuadratID, Park, EcoSite, Plot, Transect, Quadrat, EventYear, CurrentSpecies, CoverClass)%>%
+  pivot_wider(names_from = CurrentSpecies, values_from = CoverClass)%>%
+  select(-TransectQuadratID)%>%
+  filter(EventYear>2007)%>%
+  mutate(Network = "PJ")%>%
+  rename("PURTRI" = "Purshia tridentata", "PURSTA" = "Purshia stansburiana","GUTSAR"  = "Gutierrezia sarothrae", "CERMON" =  "Cercocarpus montanus", "ARTTRI" = "Artemisia tridentata", "AMEUTA" = "Amelanchier utahensis", "PENLIN" = "Penstemon linarioides", "QUERC"= "Quercus spp.")
+
+write.csv(shrub_spp, "C:/_pj_m4md/assets/uplands-data/SCPN/pj_shrub_cc_all.csv", row.names = F)
+
+
+#succulent spp
+succ_spp<-spp_clean_formatted%>%
+  filter(CurrentSpecies %in% c("Opuntia spp.", "Yucca baccata"))%>%
+  separate(TransectQuadratID, c("park2", "Plot2", "YearDate", "Transect", "Quadrat"), sep = "_", remove = FALSE, extra = "warn", fill = "warn")%>%
+  mutate(Network = "PJ")%>%
+  select(TransectQuadratID, Park, EcoSite, Plot, Transect, Quadrat, EventYear, CurrentSpecies, CoverClass)%>%
+  pivot_wider(names_from = CurrentSpecies, values_from = CoverClass)%>%
+  select(-TransectQuadratID)%>%
+  mutate(Network = "PJ")%>%
+  rename("OPUNT" = "Opuntia spp.", "YUCBAC" = "Yucca baccata")
+
+write.csv(succ_spp, "C:/_pj_m4md/assets/uplands-data/SCPN/PJ_succ_spp.csv", row.names = F)
+
+#shrub spp
+forb_spp<-spp_clean_formatted%>%
+  filter(CurrentSpecies %in% c("Artemisia campestris", "Penstemon linarioides", "Amauriopsis dissecta", "Phlox hoodii", "Chenopodium spp."))%>%
+  separate(TransectQuadratID, c("park2", "Plot2", "YearDate", "Transect", "Quadrat"), sep = "_", remove = FALSE, extra = "warn", fill = "warn")%>%
+  mutate(Network = "PJ")%>%
+  select(TransectQuadratID, Park, EcoSite, Plot, Transect, Quadrat, EventYear, CurrentSpecies, CoverClass)%>%
+  pivot_wider(names_from = CurrentSpecies, values_from = CoverClass)%>%
+  select(-TransectQuadratID)%>%
+  filter(EventYear>2007)%>%
+  mutate(Network = "PJ")%>%
+  rename("ARTCAM"= "Artemisia campestris","PENLIN"="Penstemon linarioides", "AMADIS"= "Amauriopsis dissecta", "CHENOP" = "Chenopodium spp.", 'PHLHOO' =
+           "Phlox hoodii")
+
+write.csv(forb_spp, "C:/_pj_m4md/assets/uplands-data/SCPN/pj_forb_cc_all.csv", row.names = F)
+
+```
+
+Calculate cover anomaly
+
+```{r anomaly}
+spp_clean_formatted<-species_clean%>%
+  separate(TransectQuadratID, c("park2", "Plot2", "YearDate", "Transect", "Quadrat"), sep = "_", remove = FALSE, extra = "warn", fill = "warn")%>%
+  select(TransectQuadratID,	YearDate, Transect,	Quadrat,Park,	Plot,	EcoSite,	EventYear,  CurrentSpecies, Lifeform,Duration, CoverClassMidpoint_Quadrat_pct)
+
+#get mean across years to use as baseline
+spp_median<-spp_clean_formatted%>%
+  group_by(Park, EcoSite, Plot, Transect, Quadrat, CurrentSpecies, Lifeform)%>%
+  summarize(mean_cc=mean(CoverClassMidpoint_Quadrat_pct), median_cc=median(CoverClassMidpoint_Quadrat_pct), diff=mean_cc-median_cc)
+
+#let's use median for now.
+spp_with_medians<-spp_clean_formatted%>%
+  left_join(spp_median)%>%
+  rowwise()%>%
+  mutate(anomaly=CoverClassMidpoint_Quadrat_pct-median_cc)
+
+#check
+ggplot(spp_with_medians%>%filter(!anomaly==0))+
+  geom_histogram(aes(x=anomaly), binwidth = 1)
+
+#what year's had biggest and smallest anomalies?
+anomaly_spp_yr<-spp_with_medians%>%
+  group_by(EventYear, CurrentSpecies, Lifeform)%>%
+  summarize(meananomaly=mean(abs(anomaly)))
+
+anomaly_plot_yr<-spp_with_medians%>%
+  group_by(EventYear, Plot, Lifeform)%>%
+  summarize(meananomaly=mean((anomaly)))
+
+anomalyt_yr<-spp_with_medians%>%
+  group_by(EventYear, Plot, Lifeform)%>%
+  summarize(meananomaly=mean((anomaly)))
+#need to get lifeform for blanks
+write.csv(spp_with_medians, "speciesFORlifeform.csv", row.names = FALSE)
+lifeform_anomaly<-read.csv("speciesFORlifeform.csv")
+
+#group to lifeform
+summ_lifeform_anomaly<-lifeform_anomaly%>%
+  filter(EventYear>2008)%>%
+  mutate(Lifeform = ifelse(Lifeform %in% "subshrub", "shrub",Lifeform))%>%
+  mutate(Duration = ifelse(Duration %in% "biennial", "perennial", Duration))%>%
+  unite(Lifeform, c(Lifeform, Duration), sep="_")%>%
+  mutate(Lifeform=ifelse(Lifeform %in% "shrub_perennial", "SP",
+                         ifelse(Lifeform %in% "forb_annual", "FA",
+                         ifelse(Lifeform %in% "forb_perennial", "FP",
+                         ifelse(Lifeform %in% 'cactus_perennial', "CP",
+                                ifelse(Lifeform %in% 'graminoid_perennial', "GP",
+                                       ifelse(Lifeform %in% 'graminoid_annual', "GA", Lifeform)))))))%>%
+  group_by(EventYear, Lifeform)%>%
+  summarize(mean_anomaly=mean((anomaly)))%>%
+  pivot_wider(names_from = Lifeform, values_from = mean_anomaly)%>%
+  remove_rownames()%>%
+  column_to_rownames(var='EventYear')
+
+
+#for heatmap
+spp_anomaly<-spp_with_medians%>%
+  group_by(EventYear, Lifeform)%>%
+  summarize(mean_anomaly=mean(anomaly))%>%
+  select(EventYear, Lifeform, mean_anomaly)%>%
+  pivot_wider(names_from = Lifeform, values_from = mean_anomaly)%>%
+  remove_rownames()%>%
+  column_to_rownames(var='EventYear')
+
+spp_anomaly_forbs<-spp_anomaly%>%
+  filter(Lifeform %in% "forb")
+
+spp_anomaly$EventYear<-as.integer(spp_anomaly$EventYear)
+
+spp_anomaly<-as.matrix(spp_anomaly)
+summ_lifeform_anomaly<-as.matrix(summ_lifeform_anomaly)
+
+library(RColorBrewer)
+colors <- colorRampPalette(brewer.pal(8, "RdYlGn"))(10)
+heatmap(summ_lifeform_anomaly, Colv = NA, Rowv = NA, scale="column", col=colors)
+
+
+
+```
